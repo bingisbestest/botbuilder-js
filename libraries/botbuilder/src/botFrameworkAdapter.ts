@@ -405,12 +405,13 @@ export class BotFrameworkAdapter
         }
 
         const connectorClient = this.createConnectorClientInternal(reference.serviceUrl, credentials);
-        const request: Partial<Activity> = TurnContext.applyConversationReference(
+        const activity = TurnContext.applyConversationReference(
             { type: ActivityTypes.Event, name: ActivityEventNames.ContinueConversation },
             reference,
             true
         );
-        const context = this.createContext(request);
+
+        const context = this.createContext(activity);
         context.turnState.set(this.OAuthScopeKey, audience);
         context.turnState.set(this.ConnectorClientKey, connectorClient);
         await this.runMiddleware(context, callback);
@@ -499,7 +500,7 @@ export class BotFrameworkAdapter
         const response = await client.conversations.createConversation(conversationParameters);
 
         // Initialize request and copy over new conversation ID and updated serviceUrl.
-        const request: Partial<Activity> = TurnContext.applyConversationReference(
+        const activity = TurnContext.applyConversationReference(
             { type: ActivityTypes.Event, name: ActivityEventNames.CreateConversation },
             reference,
             true
@@ -512,15 +513,15 @@ export class BotFrameworkAdapter
             tenantId: reference.conversation.tenantId,
             name: null,
         };
-        request.conversation = conversation;
-        request.channelData = conversationParameters.channelData;
+        activity.conversation = conversation;
+        activity.channelData = conversationParameters.channelData;
 
         if (response.serviceUrl) {
-            request.serviceUrl = response.serviceUrl;
+            activity.serviceUrl = response.serviceUrl;
         }
 
         // Create context and run middleware
-        const context = this.createContext(request);
+        const context = this.createContext(activity);
         await this.runMiddleware(context, callback);
     }
 
@@ -1163,22 +1164,23 @@ export class BotFrameworkAdapter
         try {
             // Parse body of request
             status = 400;
-            const request = await parseRequest(req);
+            const activity = await parseRequest(req);
 
             // Authenticate the incoming request
             status = 401;
             const authHeader: string = req.headers.authorization || req.headers.Authorization || '';
 
-            const identity = await this.authenticateRequestInternal(request, authHeader);
+            const identity = await this.authenticateRequestInternal(activity, authHeader);
 
             // Set the correct callerId value and discard values received over the wire
-            request.callerId = await this.generateCallerId(identity);
+            activity.callerId = await this.generateCallerId(identity);
 
             // Process received activity
             status = 500;
-            const context: TurnContext = this.createContext(request);
+
+            const context = this.createContext(activity, req, res);
             context.turnState.set(this.BotIdentityKey, identity);
-            const connectorClient = await this.createConnectorClientWithIdentity(request.serviceUrl, identity);
+            const connectorClient = await this.createConnectorClientWithIdentity(activity.serviceUrl, identity);
             context.turnState.set(this.ConnectorClientKey, connectorClient);
 
             const oAuthScope: string = SkillValidation.isSkillClaim(identity.claims)
@@ -1192,13 +1194,13 @@ export class BotFrameworkAdapter
             // NOTE: The factoring of the code differs here when compared to C# as processActivity() returns Promise<void>.
             //       This is due to the fact that the response to the incoming activity is sent from inside this implementation.
             //       In C#, ProcessActivityAsync() returns Task<InvokeResponse> and ASP.NET handles sending of the response.
-            if (request.deliveryMode === DeliveryModes.ExpectReplies) {
+            if (activity.deliveryMode === DeliveryModes.ExpectReplies) {
                 // Handle "expectReplies" scenarios where all the activities have been buffered and sent back at once
                 // in an invoke response.
                 const expectedReplies: ExpectedReplies = { activities: context.bufferedReplyActivities as Activity[] };
                 body = expectedReplies;
                 status = StatusCodes.OK;
-            } else if (request.type === ActivityTypes.Invoke) {
+            } else if (activity.type === ActivityTypes.Invoke) {
                 // Retrieve a cached Invoke response to handle Invoke scenarios.
                 // These scenarios deviate from the request/request model as the Bot should return a specific body and status.
                 const invokeResponse: any = context.turnState.get(INVOKE_RESPONSE_KEY);
@@ -1304,7 +1306,7 @@ export class BotFrameworkAdapter
     public async sendActivities(context: TurnContext, activities: Partial<Activity>[]): Promise<ResourceResponse[]> {
         const responses: ResourceResponse[] = [];
         for (let i = 0; i < activities.length; i++) {
-            const activity: Partial<Activity> = activities[i];
+            const activity = activities[i];
             switch (activity.type) {
                 case 'delay':
                     await delay(typeof activity.value === 'number' ? activity.value : 1000);
@@ -1697,12 +1699,14 @@ export class BotFrameworkAdapter
      * Creates a turn context.
      *
      * @param request An incoming request body.
+     * @param response Optional, HTTP response for this request.
      *
      * @remarks
      * Override this in a derived class to modify how the adapter creates a turn context.
      */
-    protected createContext(request: Partial<Activity>): TurnContext {
-        return new TurnContext(this, request);
+    protected createContext(activity: Partial<Activity>, request?: WebRequest, response?: WebResponse): TurnContext;
+    protected createContext(activity: Partial<Activity>): TurnContext {
+        return new TurnContext(this, activity);
     }
 
     /**
